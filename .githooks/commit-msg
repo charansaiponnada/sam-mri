@@ -1,0 +1,14 @@
+#!/bin/sh
+# Reject commit messages that add co-authors.
+#
+# Policy for this repository: every commit is authored only by the person making
+# it. AI tools and assistants must never be credited with a `Co-authored-by:`
+# trailer (Copilot, Codex, or anything else). Contribution by a tool is described
+# in the commit body if needed, not through authorship trailers.
+msg="$1"
+if grep -Eiq '^[[:space:]]*co-authored-by[[:space:]]*:' "$msg"; then
+    echo "error: Co-authored-by trailers are not allowed in this repository." >&2
+    echo "       Remove the trailer; only the human committer is the author." >&2
+    exit 1
+fi
+exit 0
