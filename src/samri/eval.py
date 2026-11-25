@@ -20,10 +20,18 @@ from samri.data.dataset import make_volume
 from samri.data.prompts import box_from_mask, jitter_box, make_seed, point_from_mask
 from samri.metrics import dice, hd95
 from samri.models.sam_wrapper import build_model, load_trainable, to_sam_input
+from samri.prompts_iter import corrective_clicks
+
+
+def _row(vol, r, prompt, jitter, n_clicks, pred, gt):
+    return dict(pid=vol.pid, region=r, prompt=prompt, jitter=jitter, n_clicks=n_clicks,
+                dice=dice(pred, gt), hd95=hd95(pred, gt, vol.spacing),
+                gt_voxels=int(gt.sum()), pred_voxels=int(pred.sum()),
+                n_slices=int(gt.reshape(gt.shape[0], -1).any(1).sum()))
 
 
 @torch.no_grad()
-def evaluate_patient(model, vol, cfg, device, amp, prompts, jitters, bs, seed):
+def evaluate_patient(model, vol, cfg, device, amp, prompts, jitters, bs, seed, refine=()):
     d = cfg["data"]
     S, seqs, ctx, regions = d["native_size"], d["sequences"], d.get("context", 0), d["regions"]
     scale = 1024.0 / S
@@ -32,6 +40,7 @@ def evaluate_patient(model, vol, cfg, device, amp, prompts, jitters, bs, seed):
     zs_by = {r: np.where(gts[r].reshape(vol.D, -1).any(1))[0] for r in regions}
     union = sorted(set().union(*[set(z.tolist()) for z in zs_by.values()]))
     pos = {z: i for i, z in enumerate(union)}
+    refine = sorted({int(k) for k in refine if int(k) > 0})
     embs = None
     if union:  # encode each needed slice once, reuse for every region / prompt / jitter
         chunks = []
@@ -44,6 +53,8 @@ def evaluate_patient(model, vol, cfg, device, amp, prompts, jitters, bs, seed):
     rows = []
     for r in regions:
         gt, zs = gts[r], zs_by[r]
+        ridx = REGIONS.index(r)
+        box_pred = None
         for prompt in prompts:
             for j in (jitters if prompt == "box" else [0]):
                 pred = np.zeros_like(gt)
@@ -58,14 +69,42 @@ def evaluate_patient(model, vol, cfg, device, amp, prompts, jitters, bs, seed):
                     else:
                         p = np.stack([point_from_mask(m) for m in ms])
                         kw = dict(point=torch.from_numpy(p).to(device) * scale)
-                    kw["region"] = torch.full((len(zb),), REGIONS.index(r), dtype=torch.long, device=device)
+                    kw["region"] = torch.full((len(zb),), ridx, dtype=torch.long, device=device)
                     with torch.autocast(device.type, dtype=torch.bfloat16, enabled=amp):
                         lg = model.decode(embs[idx], **kw)
                     lg = F.interpolate(lg.float(), (S, S), mode="bilinear", align_corners=False)
                     pred[zb] = (lg[:, 0] > 0).cpu().numpy()
-                rows.append(dict(pid=vol.pid, region=r, prompt=prompt, jitter=j,
-                                 dice=dice(pred, gt), hd95=hd95(pred, gt, vol.spacing),
-                                 gt_voxels=int(gt.sum()), pred_voxels=int(pred.sum()), n_slices=len(zs)))
+                rows.append(_row(vol, r, prompt, j, 0, pred, gt))
+                if prompt == "box" and j == 0:
+                    box_pred = pred.copy()
+
+        if not refine or not len(zs):
+            continue
+        # Iterative refinement: start from the jitter-0 box prediction, then add one corrective
+        # click per step on the largest remaining error component (positive on FN, negative on FP).
+        # Prompts are oracle-simulated from GT, exactly like the initial box (promptable protocol).
+        pred = box_pred.copy()
+        clicks = {int(z): [] for z in zs}
+        for k in range(1, max(refine) + 1):
+            for z in zs:
+                z = int(z)
+                new = corrective_clicks(pred[z], gt[z], 1)
+                if not new:
+                    continue
+                clicks[z] += new
+                pts = np.array([[c[0], c[1]] for c in clicks[z]], dtype=np.float32) * scale
+                labs = np.array([[c[2] for c in clicks[z]]], dtype=np.int64)
+                b = box_from_mask(gt[z])[None].astype(np.float32) * scale
+                with torch.autocast(device.type, dtype=torch.bfloat16, enabled=amp):
+                    lg = model.decode(embs[pos[z]:pos[z] + 1],
+                                      box=torch.from_numpy(b).to(device),
+                                      points=torch.from_numpy(pts[None]).to(device),
+                                      labels=torch.from_numpy(labs).to(device),
+                                      region=torch.tensor([ridx], dtype=torch.long, device=device))
+                lg = F.interpolate(lg.float(), (S, S), mode="bilinear", align_corners=False)
+                pred[z] = (lg[0, 0] > 0).cpu().numpy()
+            if k in refine:
+                rows.append(_row(vol, r, "box+refine", 0, k, pred, gt))
     return rows
 
 
@@ -96,10 +135,12 @@ def main():
         splits = json.loads(sp.read_text())
     pids = splits[a.split][: a.max_patients or None]
     e = cfg["eval"]
+    refine = e.get("refine", []) or []
     rows = []
     for pid in tqdm(pids):
         vol = make_volume(cfg, pid)
-        for r in evaluate_patient(model, vol, cfg, device, amp, e["prompt"], e["jitter"], e["batch_size"], cfg["seed"]):
+        for r in evaluate_patient(model, vol, cfg, device, amp, e["prompt"], e["jitter"], e["batch_size"],
+                                  cfg["seed"], refine):
             r.update(run=cfg["name"], split=a.split, seed=cfg["seed"])
             rows.append(r)
     out = Path(a.out) if a.out else Path("runs") / cfg["name"] / f"results_{a.split}.csv"

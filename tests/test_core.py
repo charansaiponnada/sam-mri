@@ -17,6 +17,7 @@ from samri.common import region_mask  # noqa: E402
 from samri.config import load_config  # noqa: E402
 from samri.data.prompts import box_from_mask, jitter_box, point_from_mask  # noqa: E402
 from samri.metrics import dice, hd95  # noqa: E402
+from samri.prompts_iter import corrective_clicks  # noqa: E402
 
 
 def test_metrics():
@@ -40,6 +41,38 @@ def test_prompts():
     x, y = point_from_mask(m)
     assert m[int(y), int(x)]
     print("prompts ok")
+
+
+def test_metrics_edge_cases():
+    z = np.zeros((8, 8, 8), bool)
+    assert dice(z, z) == 1.0 and hd95(z, z) == 0.0
+    one = z.copy(); one[4, 4, 4] = True
+    assert dice(one, one) == 1.0 and hd95(one, one) == 0.0
+    assert dice(one, z) == 0.0 and hd95(one, z) == 373.13
+    a = z.copy(); a[1:3, 1:3, 1:3] = True
+    b = z.copy(); b[3:5, 1:3, 1:3] = True
+    assert abs(hd95(a, b) - 2.0) < 1e-6          # far faces are 2 voxels apart (95th pct)
+    assert abs(hd95(a, b, spacing=(3, 1, 1)) - 6.0) < 1e-6
+    print("metric edge cases ok")
+
+
+def test_iterative_prompts():
+    gt = np.zeros((40, 40), bool); gt[10:30, 10:30] = True
+    # missed tumour -> positive click inside the FN component
+    c = corrective_clicks(np.zeros_like(gt), gt, 3)
+    assert len(c) == 1 and c[0][2] == 1 and gt[c[0][1], c[0][0]]
+    # over-segmentation -> negative click inside the FP ring
+    pred = np.zeros_like(gt); pred[5:35, 5:35] = True
+    c = corrective_clicks(pred, gt, 1)
+    assert c and c[0][2] == 0 and pred[c[0][1], c[0][0]] and not gt[c[0][1], c[0][0]]
+    # both error types: a 2-click budget covers one of each
+    pred[15:20, 15:20] = False
+    c = corrective_clicks(pred, gt, 2)
+    assert len(c) == 2 and {lab for _, _, lab in c} == {0, 1}
+    # no error -> no clicks; budget capped by the number of components
+    assert corrective_clicks(gt, gt, 5) == []
+    assert len(corrective_clicks(np.zeros_like(gt), gt, 5)) == 1
+    print("iterative prompts ok")
 
 
 def test_config():
@@ -78,4 +111,5 @@ def test_preprocess():
 
 
 if __name__ == "__main__":
-    test_metrics(); test_prompts(); test_config(); test_preprocess()
+    test_metrics(); test_metrics_edge_cases(); test_prompts(); test_iterative_prompts()
+    test_config(); test_preprocess()

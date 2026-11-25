@@ -66,6 +66,46 @@ def add_lora(image_encoder, rank, alpha):
         blk.attn.qkv = LoRAQKV(blk.attn.qkv, rank, alpha)
 
 
+# ---------------------------------------------------------------- bottleneck adapters
+class BottleneckAdapter(nn.Module):
+    """SAMed-style bottleneck adapter: down-project, nonlinearity, up-project, residual.
+
+    The up-projection is zero-initialised, so inserting adapters leaves the frozen SAM output
+    unchanged at step 0 and training can only add to it. Placed once per ViT block (on the block
+    output), which keeps the change small and comparable across adaptation strategies.
+    """
+
+    def __init__(self, dim, bottleneck=64, scale=1.0):
+        super().__init__()
+        self.down = nn.Linear(dim, bottleneck)
+        self.act = nn.GELU()
+        self.up = nn.Linear(bottleneck, dim)
+        nn.init.zeros_(self.up.weight)
+        nn.init.zeros_(self.up.bias)
+        self.scale = float(scale)
+
+    def forward(self, x):
+        return x + self.scale * self.up(self.act(self.down(x)))
+
+
+def add_bottleneck_adapters(image_encoder, bottleneck=64, scale=1.0):
+    dim = image_encoder.blocks[0].norm1.normalized_shape[0]
+    for blk in image_encoder.blocks:
+        adapter = BottleneckAdapter(dim, bottleneck, scale)
+        blk.adapter = adapter
+        orig = blk.forward
+
+        def wrapped(x, _o=orig, _a=adapter):
+            return _a(_o(x))
+
+        blk.forward = wrapped
+
+
+def unfreeze_encoder(sam):
+    for p in sam.image_encoder.parameters():
+        p.requires_grad = True
+
+
 def enable_grad_checkpoint(image_encoder):
     for blk in image_encoder.blocks:
         orig = blk.forward
@@ -183,22 +223,31 @@ class SamMRI(nn.Module):
             x = self.adapter(x)
         return self.sam.image_encoder(self._norm(x))
 
-    def decode(self, emb, box=None, point=None, region=None):
-        """box: (B,4) xyxy in 1024-frame px; point: (B,2) xy. emb[i] is paired with prompt i.
-        region: (B,) long region index (WT/TC/ET) used to condition the prompt tokens.
-        Returns low-res logits (B,1,256,256)."""
+    def decode(self, emb, box=None, point=None, points=None, labels=None, region=None):
+        """box: (B,4) xyxy in 1024-frame px; point: (B,2) xy; points: (B,N,2) with labels (B,N)
+        (1 = positive/foreground, 0 = negative/background). box and points may be combined
+        (iterative refinement). emb[i] is paired with prompt i. region: (B,) long region index
+        (WT/TC/ET) used to condition the prompt tokens. Returns low-res logits (B,1,256,256)."""
         pe = self.sam.prompt_encoder
-        if box is not None:
-            sparse, dense = pe(points=None, boxes=box, masks=None)
-        else:
+        if points is None and point is not None:
+            points = point[:, None, :]
             labels = torch.ones(point.shape[0], 1, dtype=torch.int, device=point.device)
-            sparse, dense = pe(points=(point[:, None, :], labels), boxes=None, masks=None)
+        elif points is not None and points.ndim == 2:
+            points = points[:, None, :]
+        if points is not None and labels is None:
+            labels = torch.ones(points.shape[:2], dtype=torch.int, device=points.device)
+        if points is None:
+            sparse, dense = pe(points=None, boxes=box, masks=None)
+        elif box is None:
+            sparse, dense = pe(points=(points, labels.to(torch.int)), boxes=None, masks=None)
+        else:
+            sparse, dense = pe(points=(points, labels.to(torch.int)), boxes=box, masks=None)
         if region is not None and self.region_cond:
             sparse = sparse + self.region_emb(region.to(sparse.device))[:, None, :]
         return decode_one_to_one(self.sam.mask_decoder, emb, pe.get_dense_pe(), sparse, dense)
 
-    def forward(self, x, box=None, point=None, region=None):
-        return self.decode(self.encode(x), box, point, region)
+    def forward(self, x, box=None, point=None, points=None, labels=None, region=None):
+        return self.decode(self.encode(x), box, point, points, labels, region)
 
 
 def build_model(cfg):
@@ -214,6 +263,10 @@ def build_model(cfg):
                    m.get("region_cond", False))
     if m.get("lora_rank", 0) > 0:
         add_lora(sam.image_encoder, m["lora_rank"], m.get("lora_alpha", m["lora_rank"]))
+    if m.get("bottleneck_dim", 0):
+        add_bottleneck_adapters(sam.image_encoder, int(m["bottleneck_dim"]), float(m.get("bottleneck_scale", 1.0)))
+    if m.get("unfreeze_encoder", False):
+        unfreeze_encoder(sam)
     if m.get("train_decoder", True):
         for p in sam.mask_decoder.parameters():
             p.requires_grad = True
