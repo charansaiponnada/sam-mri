@@ -1,0 +1,6 @@
+_base_: base.yaml
+name: e6b_fusion_25d           # per sequence: slices z-1,z,z+1 as RGB, then embedding fusion
+data: {sequences: [t1, t1ce, t2, flair], context: 1}
+model: {adapter: fusion}
+train: {batch_size: 4}
+eval: {batch_size: 8}

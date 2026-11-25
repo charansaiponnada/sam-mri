@@ -1,0 +1,3 @@
+_base_: base.yaml
+name: e1_zeroshot_sam
+model: {lora_rank: 0, train_decoder: false, grad_checkpoint: false}

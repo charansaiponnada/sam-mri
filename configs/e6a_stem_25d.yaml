@@ -1,0 +1,4 @@
+_base_: base.yaml
+name: e6a_stem_25d             # multi-sequence stem + neighbouring slices (12 input channels)
+data: {sequences: [t1, t1ce, t2, flair], context: 1}
+model: {adapter: stem}

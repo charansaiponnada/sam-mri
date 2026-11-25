@@ -1,0 +1,18 @@
+_base_: e5a_stem.yaml
+name: pilot_msd                # PILOT on public MSD Task01 (BraTS-derived); not a paper result
+data:
+  raw: data/raw/MSD
+  splits: data/msd_meta/splits.json
+  index: data/msd_meta/index.csv
+  stream_cache: data/msd_cache
+  train_fraction: 0.15         # ~51 of ~339 train patients: enough to see a real learning curve
+train:
+  epochs: 3
+  batch_size: 4
+  num_workers: 6
+  val_items: 160
+  warmup_steps: 50
+eval:
+  prompt: [box]
+  jitter: [0, 10]
+  batch_size: 8

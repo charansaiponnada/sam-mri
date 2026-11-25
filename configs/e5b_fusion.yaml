@@ -1,0 +1,6 @@
+_base_: base.yaml
+name: e5b_fusion               # each sequence through the shared encoder, embeddings fused (4x encoder cost)
+data: {sequences: [t1, t1ce, t2, flair]}
+model: {adapter: fusion}
+train: {batch_size: 4}
+eval: {batch_size: 8}

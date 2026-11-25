@@ -1,0 +1,9 @@
+_base_: e5a_stem.yaml
+name: e11_3d_loss              # T3a: loss-only 2D->3D (3D Dice + z-continuity on contiguous z-blocks)
+train:
+  vol_loss: true
+  vol_block: 3
+  vol_w3d: 0.5
+  vol_tv: 0.01
+  batch_size: 2                # each item is a 3-slice block, so effective batch = 6 slices
+eval: {batch_size: 8}

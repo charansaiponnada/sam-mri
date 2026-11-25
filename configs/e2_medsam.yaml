@@ -1,0 +1,9 @@
+_base_: base.yaml
+name: e2_medsam
+model:
+  sam_checkpoint: checkpoints/medsam_vit_b.pth
+  input_norm: unit
+  lora_rank: 0
+  train_decoder: false
+  grad_checkpoint: false
+eval: {prompt: [box], jitter: [0, 5, 10, 20]}   # MedSAM is box-prompted

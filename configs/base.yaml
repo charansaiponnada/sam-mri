@@ -1,0 +1,55 @@
+name: base
+seed: 42
+data:
+  # stream    = read the real BraTS NIfTI volumes lazily (no preprocessing needed)
+  # processed = read preprocessed uint8 memmaps (run samri.data.preprocess once)
+  mode: stream
+  raw: data/raw/BraTS2021        # expected <raw>/<case>/<case>_{t1,t1ce,t2,flair,seg}.nii(.gz)
+  layout: brats21                # brats21 | brats23
+  split_mode: random             # random (70/10/20) | all-test (external evaluation set)
+  stream_cache: data/stream_cache  # lazy per-patient uint8 cache (first touch); null = memory only
+  workers: 8                     # parallel workers for the one-time slice-index build
+  cache_patients: 6              # per-worker lazy volume cache (stream mode)
+  root: data/processed/brats21   # used when mode=processed
+  splits: data/brats21_meta/splits.json
+  index: data/brats21_meta/index.csv
+  native_size: 256            # preprocessing pads 240x240 BraTS slices to 256 (4x upsample to SAM's 1024)
+  sequences: [t1ce, t2, flair]   # channel order fed to SAM (naive RGB mapping)
+  context: 0                  # 1 = also feed slices z-1, z+1 (2.5D)
+  regions: [WT, TC, ET]
+  min_area: 10                # min GT pixels for a training/val item
+  train_fraction: 1.0         # low-data curves: 0.05 / 0.1 / 0.25 / 0.5
+  data_seed: 0                # which patients form the low-data subset
+model:
+  sam_type: vit_b
+  sam_checkpoint: checkpoints/sam_vit_b_01ec64.pth
+  input_norm: sam             # 'sam' = SAM mean/std; 'unit' = MedSAM ([0,1] directly)
+  adapter: identity           # identity | stem | fusion
+  lora_rank: 8
+  lora_alpha: 8
+  train_decoder: true
+  grad_checkpoint: true
+  region_cond: true           # condition the decoder on the target region (WT/TC/ET); zero-init = no-op at start
+train:
+  epochs: 20
+  batch_size: 8
+  lr: 1.0e-4
+  adapter_lr: 1.0e-3
+  weight_decay: 0.01
+  warmup_steps: 200
+  prompt: box                 # box | point | mixed
+  train_jitter: 20            # max box jitter in 1024-frame pixels
+  num_workers: 8
+  grad_clip: 1.0
+  val_items: 1500
+  val_jitter: 5
+  amp: true
+  # T3a loss-only 2D->3D: contiguous z-block sampling + 3D Dice + z-continuity (TV).
+  vol_loss: false          # off by default; enable for E11
+  vol_block: 3             # slices per z-block when vol_loss is on
+  vol_w3d: 0.5             # weight of the block-level 3D Dice term
+  vol_tv: 0.01             # weight of the z-continuity term
+eval:
+  prompt: [box, point]
+  jitter: [0, 5, 10, 20]      # box jitter in 1024-frame pixels (point prompts ignore it)
+  batch_size: 16

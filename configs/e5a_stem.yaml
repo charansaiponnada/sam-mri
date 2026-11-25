@@ -1,0 +1,4 @@
+_base_: base.yaml
+name: e5a_stem                 # 4 sequences -> learned 4->3 channel stem (starts = naive mapping)
+data: {sequences: [t1, t1ce, t2, flair]}
+model: {adapter: stem}

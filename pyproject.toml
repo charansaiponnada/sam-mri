@@ -1,0 +1,12 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "samri"
+version = "0.1.0"
+requires-python = ">=3.9"
+dependencies = ["torch>=2.1", "numpy", "scipy", "pandas", "nibabel", "pyyaml", "tqdm", "segment-anything"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,11 @@
+_base_: pilot_msd.yaml
+name: pilot_msd_t3a          # T3a: loss-only 2D->3D on real MSD stream, matched 41-patient subset
+train:
+  vol_loss: true
+  vol_block: 3
+  vol_w3d: 0.5
+  vol_tv: 0.01
+  batch_size: 2              # 2 blocks x 3 slices = 6 slices per step
+  epochs: 1
+  num_workers: 6
+  val_items: 160

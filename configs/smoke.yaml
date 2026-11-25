@@ -1,0 +1,6 @@
+_base_: base.yaml
+name: smoke
+data: {mode: processed, root: data/smoke_processed, splits: data/smoke_processed/splits.json, sequences: [t1, t1ce, t2, flair], min_area: 1}
+model: {sam_type: test, sam_checkpoint: null, adapter: stem, lora_rank: 4, grad_checkpoint: false}
+train: {epochs: 1, batch_size: 2, num_workers: 0, val_items: 6, warmup_steps: 2}
+eval: {prompt: [box, point], jitter: [0, 10], batch_size: 4}
