@@ -94,3 +94,46 @@ Do E0-E4 before your own method. Run 3 seeds (`seed=1,2,3`) for every trained mo
   baselines are not strawmen.
 - No clinical claims: "benchmark segmentation performance" only.
 - `adapter_lr`, LoRA rank, epochs are starting values; tune on the validation split only. Never on test.
+
+## 5. Chapter experiments — book-chapter runbook
+
+Target: *"Adapting Promptable Foundation Models to Brain MRI: SAM-Style Segmentation on BraTS"*
+— comparison of **adaptation strategy** (zero-shot / decoder / LoRA / bottleneck / full FT), **prediction
+dimensionality** (2D / 2.5D / 3D T3a), **prompt design** (click, box, box+jitter, iterative refinement).
+
+Configs (all under `configs/chapter/`; data base selects MSD Task01 pilot vs BraTS 2021):
+
+| Group | Config | Method |
+|---|---|---|
+| baseline | `chapter/zero_shot.yaml` | Zero-shot SAM (oracle box/click prompts) |
+| baseline | `chapter/medsam.yaml` | MedSAM zero-shot (box) — ckpt required |
+| adaptation | `chapter/decoder.yaml` | Decoder-only fine-tuning |
+| adaptation | `chapter/lora.yaml` | LoRA (+ 2.5D / 3D variants) |
+| adaptation | `chapter/bottleneck.yaml` | Bottleneck adapters (zero-init) |
+| adaptation | `chapter/fullft.yaml` | Full fine-tuning (encoder unfrozen, grad accum 3) |
+| dimension | `chapter/25d.yaml` | 2.5D (context 1) |
+| dimension | `chapter/3d.yaml` | 3D T3a (loss-only 3D Dice + z-TV) |
+| prompts | `chapter/lora_prompts.yaml` | LoRA + iterative refinement (1/3/5 clicks) |
+
+```bash
+# one-shot chapter pipeline (2x NVIDIA L40S via CUDA_VISIBLE_DEVICES, stages run cheap-first)
+bash scripts/run_chapter_experiments.sh            # STAGE=all (data, zero, medsam, train, prompt, report)
+STAGE=zero bash scripts/run_chapter_experiments.sh
+STAGE=train bash scripts/run_chapter_experiments.sh
+STAGE=prompt bash scripts/run_chapter_experiments.sh
+STAGE=report bash scripts/run_chapter_experiments.sh
+
+# or run single lines:
+python -m samri.train --config configs/chapter/lora.yaml --set name=ch_lora_s1 seed=1
+python -m samri.eval  --config configs/chapter/lora.yaml --set name=ch_lora_s1 seed=1 --ckpt runs/ch_lora_s1/best.pt
+python -m samri.report tables --runs 'runs/ch_*'
+python -m samri.report figures --runs 'runs/ch_*'
+python -m samri.failure --config configs/chapter/lora.yaml --ckpt runs/ch_lora_s1/best.pt --run ch_lora_s1 --k 3
+```
+
+Outputs: `results/main_table.{csv,md}`, `results/prompts_table.csv`, `results/dim_table.csv`,
+`paper/tables/*.tex`, `paper/figures/{dice_vs_*,failure_gallery}.{pdf,png}`.
+
+**Dataset label:** every chapter table/figure/caption currently says **"MSD Task01 pilot, not BraTS 2021"**
+(Run `STAGE=data` for the BraTS 2021 switch via `configs/chapter/data_brats21.yaml`).
+
