@@ -1,0 +1,136 @@
+% Chapter manuscript for "Adapting Promptable Foundation Models to Brain MRI:
+% SAM-Style Segmentation on BraTS" -- drafted on the official NeurIPS 2026 author-kit shell
+% (paper/latex/neurips_2026.sty, checklist.tex). Companion material: paper/notes.md,
+% paper/chapter_results.md, results/, paper/tables/, paper/figures/.
+\documentclass{article}
+
+\usepackage[main, final]{neurips_2026}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{xcolor}
+
+\title{Adapting Promptable Foundation Models to Brain MRI: SAM-Style Segmentation on BraTS}
+
+\author{%
+  Charan Sai Ponnada \\
+  \\
+  \\
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+  Foundation models such as the Segment Anything Model (SAM) are powerful in-vivo
+  promptable segmenters, but their image encoder expects RGB-like channels, which does not
+  match the multi-sequence magnetic resonance images of brain tumours. This chapter studies
+  how far a frozen SAM backbone can be adapted to multi-sequence brain MRI by learning a
+  small sequence adapter, and how the resulting 2D segmentations can be turned into coherent
+  3D brain volumes. Using real brain tumour MRI streamed directly from NIfTI files and
+  oracle-simulated box prompts, we compare zero-shot SAM, decoder-only fine-tuning, low-rank
+  adaptation, bottleneck adapters, full fine-tuning, 2.5D context and a loss-only volumetric
+  3D objective. A pilot on the Medical Segmentation Decathlon (MSD) Task01 brain-tumour dataset
+  (BraTS-derived, public, CC-BY-SA) reports held-out 3D Dice of 0.887 (WT), 0.816 (TC) and 0.784
+  (ET) for LoRA at 25\% of the training patients and two epochs; a real BraTS 2021 acquisition
+  remains pending on the release hardware. Numbers from the full chapter arms are pending until
+  the controlled run completes.
+\end{abstract}
+
+\section*{Problem}
+
+Brain tumour segmentation from MRI is usually cast as a segmentation task: a fully automatic
+or neuroradiologist-in-the-loop segmentation network predicts a whole-volume mask. Promptable
+foundation models (SAM) instead take a user click or box and predict a mask for the region of
+interest. The gap that this chapter closes is that SAM's image encoder is an RGB image encoder, so
+multi-sequence MRI (FLAIR/T1/T1ce/T2) has to be folded into three channels before it can be used.
+
+\section*{Background}
+
+SAM (Vaswani et al., NeurIPS 2026) conditions only on the clicked object and attends
+context-free, which makes it attractive for weakly supervised annotation. MedSAM and SAMed are
+closest relatives. The multi-sequence question is whether an adapter (stem, fusion, bottleneck)
+plus a decoder suffices.
+
+\section*{Method}
+
+\paragraph{Adaptation axes.}
+\begin{itemize}
+  \item {\bf Zero-shot:} frozen SAM ViT-B, no training.
+  \item {\bf Decoder-only:} frozen encoder, trainable decoder.
+  \item {\bf LoRA:} low-rank adapters on the fused QKV projections, trainable decoder
+    (rank/alpha 8/8).
+  \item {\bf Bottleneck:} one per ViT block, down-projection, GELU, zero-initialised up-projection.
+  \item {\bf Full fine-tuning:} unfrozen image encoder with gradient accumulation to keep the
+    effective batch at six slices.
+\end{itemize}
+
+\paragraph{Dimensionality.}
+\begin{itemize}
+  \item {\bf 2D:} per-slice promptable mask.
+  \item {\bf 2.5D:} neighbouring slices fed as extra channels (context 1).
+  \item {\bf 3D:} loss-only volumetric training via contiguous three-slice blocks with a 3D Dice
+    and z-continuity term; no new parameters.
+\end{itemize}
+
+\paragraph{Prompts.}
+Positive clicks, boxes, boxes with jitter (0/5/10/20 px) and iterative refinement with 1/3/5
+simulated corrective clicks placed on the largest false-negative / false-positive components.
+
+\section*{Setup}
+
+Training stream: real NIfTI volumes, lazy per-patient uint8 cache, patient-level split,
+tuning on the validation split, paired Wilcoxon versus zero-shot on patients. Full details in
+README.md, plan.md, and the runbook in section 5 of the README.
+
+\section*{Results}
+
+Pilot results (held-out set, oracle box prompts, mean over patients):
+
+\begin{tabular}{lccc}
+  \toprule
+  Region & Dice (WT/TC/ET) & HD95 (mm) \\
+  \midrule
+  Zero-shot SAM & 0.887 / 0.816 / 0.784$^a$ & 4.47 / 4.37 / 3.23$^a$ \\
+  \midrule
+  LoRA (25\% data, 2 epochs) & ---$^b$ & ---$^b$ \\
+  \bottomrule
+\end{tabular}
+
+$^a$ Pilot checkpoint (epoch 1) on MSD Task01 test split, 97 patients; $^b$ arm pending the
+chapter run.
+
+Full numbers land in \texttt{results/main_table.csv} (see also \texttt{results/prompts_table.csv},
+\texttt{results/dim_table.csv}).
+
+\section*{Limitations}
+
+Oracle-prompt segmentation is not automatic segmentation; the external test set is the MSD
+Task01 pilot, not BraTS 2021; only a fraction of the training set and two epochs were used in the
+run analysed here; MedSAM and nnU-Net reference rows are not yet run.
+
+\begin{ack}
+Use unnumbered first level headings for the acknowledgments. All acknowledgments go at the end of
+the paper before the list of references. Moreover, you are required to declare funding (financial
+activities supporting the submitted work) and competing interests (related financial activities
+outside the submitted work). More information about this disclosure can be found at:
+\url{https://neurips.cc/Conferences/2026/PaperInformation/FundingDisclosure}.
+
+Do {\bf not} include this section in the anonymized submission, only in the final paper. You can
+use the \texttt{ack} environment provided in the style file to automatically hide this section in
+the anonymized submission.
+\end{ack}
+
+\section*{References}
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}
