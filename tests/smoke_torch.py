@@ -21,7 +21,8 @@ ENV = {**os.environ, "PYTHONPATH": str(ROOT / "src")}
 
 from make_synthetic import make  # noqa: E402
 from samri.config import load_config  # noqa: E402
-from samri.models.sam_wrapper import FusionHead, add_lora, build_model, build_sam, load_trainable, trainable_state_dict  # noqa: E402
+from samri.models.sam_wrapper import (FusionHead, add_bottleneck_adapters, add_lora, build_model, build_sam,
+                                      load_trainable, trainable_state_dict)  # noqa: E402
 
 
 def run(*args):
@@ -73,6 +74,32 @@ def unit_checks():
         with torch.no_grad():
             out = m(torch.rand(2, ch, 1024, 1024), box=box[:2])
         assert out.shape == (2, 1, 256, 256)
+    # 7) bottleneck adapters: exact no-op at init, trainable afterwards
+    c = load_config("configs/smoke.yaml"); c["model"]["lora_rank"] = 0
+    mb = build_model(c).eval()
+    xi = torch.rand(1, 4, 1024, 1024)
+    with torch.no_grad():
+        before = mb(xi, box=box[:1])
+    add_bottleneck_adapters(mb.sam.image_encoder, 16)
+    with torch.no_grad():
+        after = mb(xi, box=box[:1])
+    assert torch.allclose(before, after, atol=1e-6)
+    assert any(".adapter." in n for n, p in mb.named_parameters() if p.requires_grad)
+    # 8) box + multi-point prompts (positive and negative) match per-sample decoding
+    xi2 = torch.rand(2, 4, 1024, 1024)
+    pts = torch.tensor([[[200., 300.], [100., 100.]], [[50., 50.], [300., 200.]]])
+    lab = torch.tensor([[1, 0], [1, 1]])
+    with torch.no_grad():
+        emb2 = mb.encode(xi2)
+        multi = mb.decode(emb2, box=box[:2], points=pts, labels=lab)
+        single = torch.cat([mb.decode(emb2[i:i + 1], box=box[i:i + 1], points=pts[i:i + 1], labels=lab[i:i + 1])
+                            for i in range(2)])
+    assert multi.shape == (2, 1, 256, 256) and torch.allclose(multi, single, atol=1e-4)
+    # 9) full fine-tuning flag unfreezes the whole encoder
+    c = load_config("configs/smoke.yaml"); c["model"]["unfreeze_encoder"] = True
+    mf = build_model(c)
+    enc = list(mf.sam.image_encoder.parameters())
+    assert enc and all(p.requires_grad for p in enc)
     print("unit checks ok")
 
 
@@ -80,7 +107,7 @@ def pipeline():
     # Use a throwaway dir so the committed repo never keeps synthetic data.
     tmp = Path(tempfile.mkdtemp(prefix="samri_smoke_"))
     raw, proc = tmp / "raw", tmp / "processed"
-    for d in (ROOT / "runs/smoke", ROOT / "runs/smoke_vol"):
+    for d in (ROOT / "runs/smoke", ROOT / "runs/smoke_vol", ROOT / "runs/smoke_resume", ROOT / "runs/smoke_refine"):
         shutil.rmtree(d, ignore_errors=True)
     make(raw)
     run("samri.data.preprocess", "--raw", str(raw), "--out", str(proc), "--workers", "1")
@@ -101,6 +128,24 @@ def pipeline():
         "name=smoke_vol", "--ckpt", "runs/smoke_vol/best.pt")
     dv = pd.read_csv("runs/smoke_vol/results_test.csv")
     assert len(dv) == len(df) and dv.dice.between(0, 1).all() and (dv.hd95 >= 0).all(), len(dv)
+
+    # resume: one epoch, then continue to a second epoch from last.pt
+    run("samri.train", "--config", "configs/smoke.yaml", "--set", *base,
+        "name=smoke_resume", "train.epochs=1")
+    run("samri.train", "--config", "configs/smoke.yaml", "--set", *base,
+        "name=smoke_resume", "train.epochs=2", "--resume")
+    lg = json.loads((ROOT / "runs/smoke_resume/log.json").read_text())
+    assert [r["epoch"] for r in lg] == [0, 1], lg
+    meta = json.loads((ROOT / "runs/smoke_resume/run_meta.json").read_text())
+    assert meta["params_trainable"] > 0 and meta["wall_sec_total"] > 0 and meta["effective_batch"] == 2
+
+    # iterative refinement rows (1 and 2 corrective clicks) on the 2D checkpoint
+    run("samri.eval", "--config", "configs/smoke.yaml", "--set", *base, "name=smoke_refine",
+        "eval.refine=[1, 2]", "--ckpt", "runs/smoke/best.pt")
+    dr = pd.read_csv("runs/smoke_refine/results_test.csv")
+    ref = dr[dr.prompt == "box+refine"]
+    assert set(ref.n_clicks) == {1, 2} and ref.dice.between(0, 1).all()
+    assert len(dr) == len(df) + n_test * 3 * 2, (len(dr), len(df))
 
     run("samri.report", "summary", "runs/smoke/results_test.csv")
     shutil.rmtree(tmp, ignore_errors=True)

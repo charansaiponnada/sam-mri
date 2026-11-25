@@ -1,6 +1,7 @@
 import argparse
 import json
 import math
+import subprocess
 import time
 from pathlib import Path
 
@@ -13,7 +14,7 @@ from tqdm import tqdm
 from samri.common import seed_everything
 from samri.config import load_config
 from samri.data.dataset import SliceDataset
-from samri.models.sam_wrapper import build_model, to_sam_input, trainable_state_dict
+from samri.models.sam_wrapper import build_model, load_trainable, to_sam_input, trainable_state_dict
 
 
 def select_patients(pids, frac, data_seed):
@@ -113,6 +114,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
     ap.add_argument("--set", nargs="*", default=[], help="overrides, e.g. train.epochs=5 seed=1 name=foo")
+    ap.add_argument("--resume", action="store_true", help="continue from runs/<name>/last.pt")
     a = ap.parse_args()
     cfg = load_config(a.config, a.set)
     seed_everything(cfg["seed"])
@@ -149,21 +151,55 @@ def main():
     named = [(n, p) for n, p in model.named_parameters() if p.requires_grad]
     if not named:
         raise SystemExit("no trainable parameters (zero-shot config?) - use samri.eval directly")
-    adapter = [p for n, p in named if n.startswith(("adapter", "fusion"))]
-    rest = [p for n, p in named if not n.startswith(("adapter", "fusion"))]
+    is_adapter = lambda n: n.startswith(("adapter", "fusion")) or ".adapter." in n  # noqa: E731
+    adapter = [p for n, p in named if is_adapter(n)]
+    rest = [p for n, p in named if not is_adapter(n)]
     groups = [dict(params=rest, lr=t["lr"])] + ([dict(params=adapter, lr=t["adapter_lr"])] if adapter else [])
     opt = torch.optim.AdamW(groups, weight_decay=t["weight_decay"])
-    total = t["epochs"] * len(dl_tr)
+    accum = max(1, int(t.get("grad_accum", 1)))
+    steps_per_epoch = math.ceil(len(dl_tr) / accum)
+    total = t["epochs"] * steps_per_epoch
     sched = torch.optim.lr_scheduler.LambdaLR(
         opt, lambda s: min(1.0, (s + 1) / t["warmup_steps"]) * 0.5 * (1 + math.cos(math.pi * min(s / total, 1.0))))
-    print(f"trainable params: {sum(p.numel() for _, p in named) / 1e6:.2f}M")
+    n_params = sum(p.numel() for _, p in named)
+    print(f"trainable params: {n_params / 1e6:.2f}M  (adapter {sum(p.numel() for p in adapter) / 1e6:.2f}M, "
+          f"rest {sum(p.numel() for p in rest) / 1e6:.2f}M)  effective batch {t['batch_size'] * accum}")
+
+    try:
+        git_sha = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], text=True,
+                                          stderr=subprocess.DEVNULL).strip()
+    except Exception:
+        git_sha = "unknown"
+    meta = dict(name=cfg["name"], seed=cfg["seed"], dataset=cfg["data"].get("raw"),
+                splits=cfg["data"].get("splits"), git_sha=git_sha, device=str(device),
+                params_trainable=int(n_params), params_adapter=int(sum(p.numel() for p in adapter)),
+                batch_size=t["batch_size"], grad_accum=accum, effective_batch=t["batch_size"] * accum,
+                steps_per_epoch=steps_per_epoch, epochs=t["epochs"],
+                train_patients=len(train_pids), train_items=len(ds_tr),
+                started=time.strftime("%Y-%m-%d %H:%M:%S"))
+    (out / "run_meta.json").write_text(json.dumps(meta, indent=1))
 
     rng = np.random.default_rng(cfg["seed"])
-    best, step, log = -1.0, 0, []
-    for epoch in range(t["epochs"]):
+    start_epoch, best, step, log = 0, -1.0, 0, []
+    if a.resume and (out / "last.pt").exists():
+        ck = torch.load(out / "last.pt", map_location="cpu", weights_only=False)
+        load_trainable(model, ck["trainable"])
+        if ck.get("opt") is not None:
+            opt.load_state_dict(ck["opt"])
+        if ck.get("sched") is not None:
+            sched.load_state_dict(ck["sched"])
+        start_epoch = int(ck.get("epoch", -1)) + 1
+        step = int(ck.get("step", 0))
+        log = ck.get("log", [])
+        best = max([float(r["val_dice2d"]) for r in log], default=-1.0)
+        print(f"resumed {out / 'last.pt'} at epoch {start_epoch} (best val {best:.4f})")
+    wall0 = time.time()
+
+    for epoch in range(start_epoch, t["epochs"]):
         model.train()
         t0, run = time.time(), []
-        for batch in tqdm(dl_tr, desc=f"epoch {epoch}", leave=False):
+        opt.zero_grad(set_to_none=True)
+        for i, batch in enumerate(tqdm(dl_tr, desc=f"epoch {epoch}", leave=False)):
             kind = t["prompt"] if t["prompt"] != "mixed" else ("box" if rng.random() < 0.5 else "point")
             if t.get("vol_loss", False):
                 logits = block_forward(model, batch, kind, device, S, amp)
@@ -174,23 +210,29 @@ def main():
                 logits = run_forward(model, batch, kind, device, S, amp,
                                      region=batch["region"].to(device))
                 loss = seg_loss(logits, batch["mask"].to(device)[:, None])
-            opt.zero_grad(set_to_none=True)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_([p for _, p in named], t["grad_clip"])
-            opt.step()
-            sched.step()
-            step += 1
-            run.append(loss.item())
+            run.append(float(loss.detach()))
+            (loss / accum).backward()
+            if (i + 1) % accum == 0 or i + 1 == len(dl_tr):
+                torch.nn.utils.clip_grad_norm_([p for _, p in named], t["grad_clip"])
+                opt.step()
+                sched.step()
+                opt.zero_grad(set_to_none=True)
+                step += 1
         vd = validate(model, dl_va, device, S, amp)
-        row = dict(epoch=epoch, step=step, train_loss=float(np.mean(run)), val_dice2d=vd, sec=time.time() - t0)
+        row = dict(epoch=epoch, step=step, train_loss=float(np.mean(run)), val_dice2d=vd,
+                   sec=time.time() - t0, wall_sec=time.time() - wall0)
         log.append(row)
         print(row)
-        ck = dict(trainable=trainable_state_dict(model), cfg=cfg, epoch=epoch, val_dice2d=vd)
+        ck = dict(trainable=trainable_state_dict(model), cfg=cfg, epoch=epoch, val_dice2d=vd,
+                  opt=opt.state_dict(), sched=sched.state_dict(), step=step, log=log)
         torch.save(ck, out / "last.pt")
         if vd > best:
             best = vd
             torch.save(ck, out / "best.pt")
         (out / "log.json").write_text(json.dumps(log, indent=1))
+    meta.update(epochs_done=len(log), best_val=best, wall_sec_total=time.time() - wall0,
+                finished=time.strftime("%Y-%m-%d %H:%M:%S"))
+    (out / "run_meta.json").write_text(json.dumps(meta, indent=1))
     print(f"done. best val 2D Dice {best:.4f} -> {out / 'best.pt'}")
 
 
