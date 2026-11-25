@@ -1,0 +1,7 @@
+_base_: ../e5a_stem.yaml
+name: data_brats21
+data:
+  raw: data/raw/BraTS2021
+  splits: data/brats21_meta/splits.json
+  index: data/brats21_meta/index.csv
+  stream_cache: data/stream_cache

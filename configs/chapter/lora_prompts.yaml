@@ -1,0 +1,3 @@
+_base_: lora.yaml
+name: ch_lora_prompts
+eval: {prompt: [box, point], jitter: [0, 5, 10, 20], refine: [1, 3, 5]}

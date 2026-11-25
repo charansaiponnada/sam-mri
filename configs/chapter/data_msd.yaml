@@ -1,0 +1,7 @@
+_base_: ../pilot_msd.yaml
+name: data_msd
+data:
+  raw: data/raw/MSD
+  splits: data/msd_meta/splits.json
+  index: data/msd_meta/index.csv
+  stream_cache: data/msd_cache

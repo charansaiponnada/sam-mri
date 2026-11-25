@@ -1,0 +1,19 @@
+_base_: data_msd.yaml
+name: ch_base
+seed: 1
+data:
+  train_fraction: 0.25        # chapter budget: 25% of the (MSD pilot) train split, fixed schedule
+train:
+  epochs: 2
+  batch_size: 6
+  num_workers: 6
+  val_items: 240
+  warmup_steps: 50
+  prompt: box
+  train_jitter: 20
+  grad_accum: 1
+eval:
+  prompt: [box, point]
+  jitter: [0, 5, 10, 20]
+  refine: []
+  batch_size: 8

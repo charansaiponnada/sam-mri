@@ -1,0 +1,3 @@
+_base_: base.yaml
+name: ch_lora
+model: {lora_rank: 8, lora_alpha: 8, train_decoder: true}

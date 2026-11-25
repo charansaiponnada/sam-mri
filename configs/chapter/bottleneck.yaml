@@ -1,0 +1,3 @@
+_base_: base.yaml
+name: ch_bottleneck
+model: {lora_rank: 0, train_decoder: true, bottleneck_dim: 64, bottleneck_scale: 1.0}

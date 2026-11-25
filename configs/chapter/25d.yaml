@@ -1,0 +1,3 @@
+_base_: lora.yaml
+name: ch_25d
+data: {context: 1}                       # 2.5D: each of 4 sequences gets slices z-1,z,z+1

@@ -1,0 +1,3 @@
+_base_: base.yaml
+name: ch_decoder
+model: {lora_rank: 0, train_decoder: true}

@@ -1,0 +1,4 @@
+_base_: base.yaml
+name: ch_fullft
+model: {lora_rank: 0, train_decoder: true, unfreeze_encoder: true}
+train: {batch_size: 2, grad_accum: 3}   # effective batch 6, fit in GPU memory

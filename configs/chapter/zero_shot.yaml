@@ -1,0 +1,4 @@
+_base_: base.yaml
+name: ch_zero_shot
+model: {lora_rank: 0, train_decoder: false, grad_checkpoint: false, bottleneck_dim: 0}
+eval: {prompt: [box, point], jitter: [0, 5, 10, 20], refine: []}
